@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?><metadata>
+    <idinfo>
+        <citation>
+            <citeinfo>
+                <title>County Boundaries of Indiana Current</title>
+                <onlink>https://gisdata.in.gov/server/rest/services/Hosted/County_Boundaries_of_Indiana_Current/FeatureServer</onlink>
+            </citeinfo>
+        </citation>
+        <descript>
+            <abstract>These county boundaries were compiled from county boundary lines or parcels submitted by each county to the Geographic Information Office in 2021. Each county's south and east lines were preserved when possible, in accordance with surveying convention. Specific sources used for each line segment can be found in the attribute table of the service https://gisdata.in.gov/server/rest/services/Hosted/Proposed_Boundary_Line/FeatureServer/0. To compare source data, visit the web application at https://gisdata.in.gov/portal/apps/webappviewer/index.html?id=ced4032e27a44731ab5ca42e7127d5fd. County attributes were provided by the Indiana Department of Environmental Management. </abstract>
+            <purpose>This dataset contains polygon features representing Indiana county boundaries. These features were compiled from county boundary lines or parcels submitted by each county to the Geographic Information Office in 2021. The submitted data was then modified to reduce topologic errors such as gaps and overlaps between counties. Please see the description to learn about the process used to generate this dataset.</purpose>
+        </descript>
+        <keywords>
+            <theme>
+                <themekt>None</themekt>
+                <themekey>county</themekey>
+                <themekey>county boundary</themekey>
+                <themekey>county boundaries</themekey>
+                <themekey>administrative boundaries</themekey>
+                <themekey>political boundaries</themekey>
+            </theme>
+            <theme>
+                <themekt>ISO 19115 Topic Categories</themekt>
+                <themekey>boundaries</themekey>
+            </theme>
+        </keywords>
+        <accconst>Other Constraints</accconst>
+        <useconst>This product is provided &amp;quot;AS IS&amp;quot;, without any other warranties or conditions, expressed or implied, including, but not limited to, warranties for product quality, or suitability to a particular purpose or use. The risk or liability resulting from the use of this product is assumed by the user. Indiana Geographic Information Council (IGIC), Indiana Geographic Information Office (IGIO), Indiana University, Indiana Geological and Water Survey, and the Indiana counties participaing in this program share no liability with product users indirect, incidental, special, or consequential damages whatsoever including, but not limited to, loss of revenue or profit, lost or damaged data or other commercial or economic loss, including any claims by a third party. The maximum aggregate liability to the original purchaser shall not exceed the amount paid by you for the product.</useconst>
+        <datacred>IGIO, Polis Center, IDNR, IDEM</datacred>
+    </idinfo>
+    <metainfo>
+        <metd>20240221</metd>
+        <metc>
+            <cntinfo>
+                <!--no contact person or organization name available-->
+            </cntinfo>
+        </metc>
+        <metstdn>FGDC Content Standard for Digital Geospatial Metadata</metstdn>
+        <metstdv>FGDC-STD-001-1998</metstdv>
+        <mettc>local time</mettc>
+    </metainfo>
+</metadata>

@@ -260,6 +260,80 @@ folium.GeoJson(merged_gdf.to_json(), style_function=style_income,
 inc_fg.add_to(m)
 inc_cmap.add_to(m)
 
+# -------------------------------
+# 4b) County impact layer (Total Pounds by county, FIPS-safe)
+# -------------------------------
+
+# 1) Load and aggregate
+food = pd.read_csv("FoodOutgoing2023_1.csv", encoding="latin-1")
+food["County"] = food["County"].astype(str).strip()
+food["Total Pounds"] = pd.to_numeric(food["Total Pounds"], errors="coerce").fillna(0)
+
+# keep only your three codes
+food = food[food["County"].isin(["ELK", "SJ", "MAR"])].copy()
+sum_by_code = (food.groupby("County", as_index=False)["Total Pounds"]
+                    .sum()
+                    .rename(columns={"Total Pounds": "TotalPounds"}))
+
+# 2) Map county code -> 3-digit FIPS (string, zero-padded)
+code_to_fips = {"ELK": "039", "MAR": "099", "SJ": "141"}
+sum_by_code["COUNTYFP"] = sum_by_code["County"].map(code_to_fips)
+
+# 3) Ensure county GeoDataFrame has a 3-digit COUNTYFP to join on
+# Try to detect the right column; standard is 'COUNTYFP' (upper) in TIGER/Line
+candidate_cols = ["COUNTYFP", "countyfp", "COUNTY_FIP", "county_fips", "county_fips_code"]
+county_key = None
+for c in candidate_cols:
+    if c in target_counties.columns:
+        county_key = c
+        break
+if county_key is None:
+    # Fallback: if GEOID is available, last 3 are county FIPS
+    if "GEOID" in target_counties.columns:
+        target_counties["COUNTYFP"] = target_counties["GEOID"].astype(str).str[-3:]
+        county_key = "COUNTYFP"
+    else:
+        raise ValueError("Could not find a county FIPS column in county shapefile.")
+
+# Normalize to 3-digit strings
+target_counties[county_key] = target_counties[county_key].astype(str).str.zfill(3)
+
+# 4) Merge totals onto counties using FIPS (robust to naming differences)
+impact_gdf = target_counties.merge(
+    sum_by_code[["COUNTYFP", "TotalPounds"]],
+    left_on=county_key, right_on="COUNTYFP", how="left"
+)
+impact_gdf["TotalPounds"] = pd.to_numeric(impact_gdf["TotalPounds"], errors="coerce").fillna(0)
+impact_gdf["TotalPoundsLabel"] = impact_gdf["TotalPounds"].round(0).astype(int).map(lambda v: f"{v:,}")
+
+# 5) Color scale + layer
+impact_vals = impact_gdf["TotalPounds"]
+impact_cmap = make_colormap(
+    colors=["#f7fcf5", "#c7e9c0", "#74c476", "#238b45"],
+    values=impact_vals,
+    caption="Total Pounds Distributed (by County)"
+)
+
+def style_impact(feat):
+    v = feat["properties"].get("TotalPounds", 0.0)
+    return {"fillColor": impact_cmap(float(v)), "color": "black", "weight": 2, "fillOpacity": 0.55}
+
+tooltip_impact = folium.GeoJsonTooltip(
+    fields=[county_key, "TotalPoundsLabel"],
+    aliases=["County FIPS", "Total Pounds"],
+    localize=True, sticky=True
+)
+
+impact_fg = FeatureGroup(name="County Impact: Total Pounds", show=True)  # turn on by default
+folium.GeoJson(
+    impact_gdf.to_json(),
+    style_function=style_impact,
+    tooltip=tooltip_impact,
+    highlight_function=lambda x: {"weight": 3, "color": "#333", "fillOpacity": 0.75},
+).add_to(impact_fg)
+impact_fg.add_to(m)
+impact_cmap.add_to(m)
+
 # County boundaries (always on)
 folium.GeoJson(
     target_counties.to_json(),

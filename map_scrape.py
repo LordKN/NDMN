@@ -261,7 +261,7 @@ inc_fg.add_to(m)
 inc_cmap.add_to(m)
 
 # 1) Read and aggregate the FoodOutgoing file
-food = pd.read_csv("FoodOutgoing2023_1.csv", encoding="latin-1")
+food = pd.read_csv("FoodOutgoing2025_1.csv", encoding="latin-1")
 food["County"] = food["County"].astype(str).str.strip()
 
 food["Total Pounds"] = pd.to_numeric(

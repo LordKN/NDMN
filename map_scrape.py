@@ -192,7 +192,7 @@ popup_pov = folium.GeoJsonPopup(
     aliases=["Tract", "Poverty (%)", "CensusReporter"], localize=True, labels=True,
 )
 
-pov_fg = FeatureGroup(name="Poverty Level", show=True)
+pov_fg = FeatureGroup(name="Poverty Level", overlay=False, show=True)
 folium.GeoJson(merged_gdf.to_json(), style_function=style_poverty,
                tooltip=tooltip_pov, popup=popup_pov,
                highlight_function=lambda x: {"weight": 2, "color": "#666", "fillOpacity": 0.9}
@@ -227,8 +227,8 @@ tooltip_u18 = folium.GeoJsonTooltip(
     aliases=["Tract", "% <18", "% 65+", "Population"], localize=True, sticky=True,
 )
 
-age65_fg = FeatureGroup(name="Over 65 (%)", show=False)
-u18_fg   = FeatureGroup(name="Under 18 (%)", show=False)
+age65_fg = FeatureGroup(name="Over 65 (%)",overlay=False, show=False)
+u18_fg   = FeatureGroup(name="Under 18 (%)",overlay=False, show=False)
 folium.GeoJson(merged_gdf.to_json(), style_function=style_age65, tooltip=tooltip_age65).add_to(age65_fg)
 folium.GeoJson(merged_gdf.to_json(), style_function=style_u18,  tooltip=tooltip_u18 ).add_to(u18_fg)
 age65_fg.add_to(m); u18_fg.add_to(m)
@@ -252,7 +252,7 @@ popup_income = folium.GeoJsonPopup(
     aliases=["Tract", "Median Income ($)", "CensusReporter"], localize=True, labels=True,
 )
 
-inc_fg = FeatureGroup(name="Median Income", show=False)
+inc_fg = FeatureGroup(name="Median Income",overlay=False, show=False)
 folium.GeoJson(merged_gdf.to_json(), style_function=style_income,
                tooltip=tooltip_income, popup=popup_income,
                highlight_function=lambda x: {"weight": 2, "color": "#666", "fillOpacity": 0.9}
@@ -312,7 +312,7 @@ tooltip_impact = folium.GeoJsonTooltip(
 )
 
 # 5) Add the county impact layer
-impact_fg = FeatureGroup(name="County Impact: Total Pounds", show=False)
+impact_fg = FeatureGroup(name="County Impact: Total Pounds",overlay=False, show=False)
 folium.GeoJson(
     impact_gdf.to_json(),
     style_function=style_impact,

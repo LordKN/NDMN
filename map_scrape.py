@@ -172,7 +172,12 @@ target_counties = counties[counties["name"].isin(["Elkhart", "Marshall", "St Jos
 # 5) Map & layers
 # -------------------------------
 
-m = folium.Map(location=[41.68, -86.25], zoom_start=9, tiles="CartoDB positron")
+m = folium.Map(location=[41.68, -86.25], zoom_start=9, titles="None")
+folium.TileLayer(
+    tiles = "CartoDB positron",
+    name = "Light Map",
+    control = False
+).add_to(m)
 
 # Poverty choropleth
 pov_vals = merged_gdf["PovertyPct"].dropna()
@@ -331,7 +336,7 @@ folium.GeoJson(
 ).add_to(m)
 
 # Bus routes
-routes_fg = FeatureGroup(name="Bus Routes", show=True)
+routes_fg = FeatureGroup(name="Bus Routes", overlay=False, show=True)
 def route_style(feat):
     nm = feat["properties"].get(line_attr, "")
     col = route_colors.get(nm, "#808080")
@@ -345,7 +350,7 @@ folium.GeoJson(
 routes_fg.add_to(m)
 
 # Pantry buffers & markers
-buffers_fg = FeatureGroup(name="Pantry Coverage (1 mi)", show=False)
+buffers_fg = FeatureGroup(name="Pantry Coverage (1 mi)", overlay= False, show=True)
 folium.GeoJson(
     pantries_buf_gdf.to_json(),
     name="Pantry Coverage",
@@ -353,7 +358,7 @@ folium.GeoJson(
 ).add_to(buffers_fg)
 buffers_fg.add_to(m)
 
-markers_fg = FeatureGroup(name="Food Pantries", show=False)
+markers_fg = FeatureGroup(name="Food Pantries", overlay = False, show=False)
 mc = MarkerCluster().add_to(markers_fg)
 for _, r in pantries.iterrows():
     if pd.isna(r["lat"]) or pd.isna(r["long"]): 

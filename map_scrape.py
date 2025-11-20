@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Builds the interactive map with ACS-powered age, income, and poverty layers.
+Builds the interactive map with ACS-powered age, income, and poverty layers,
+plus food pantry buffers & markers geocoded via Google Places (Text Search + Details).
 
 Output:
   TranspoFoodiePovMap5__python3_reproduce_scrape.html
 """
 
+import os
+import sys
 import re
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -14,16 +17,70 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import requests
-from geopy.geocoders import ArcGIS
-from geopy.extra.rate_limiter import RateLimiter
 import folium
 from folium import FeatureGroup, LayerControl
 from folium.plugins import MarkerCluster
 import branca
+from typing import Dict, Any, Optional
 
-# -------------------------------
-# Helpers
-# -------------------------------
+# ============================================================
+# Google Places helpers (Text Search -> place_id -> Details)
+# ============================================================
+
+# Prefer env var; fall back to literal if you really must.
+API_KEY = "SIKE!"
+
+if not API_KEY:
+    # As a last resort, set directly (discouraged — consider env var)
+    API_KEY = "REPLACE_ME"
+
+def _check_api_key():
+    if API_KEY in ("REPLACE_ME", "NOPE", "", None):
+        raise RuntimeError("Google Maps API key missing. Set GOOGLE_MAPS_API_KEY or edit API_KEY.")
+
+def get_place_id(query: str, *, session: Optional[requests.Session] = None) -> str:
+    """Fetch Place ID from the Places Text Search API using a free-form query (e.g., location name)."""
+    _check_api_key()
+    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {"query": query, "key": API_KEY}
+    s = session or requests
+    resp = s.get(url, params=params, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    status = data.get("status")
+    if status != "OK":
+        raise RuntimeError(f"Text Search failed: {status} - {data.get('error_message','')}")
+    results = data.get("results", [])
+    if not results:
+        raise RuntimeError("No results returned for that query.")
+    return results[0]["place_id"]
+
+def get_place_details(place_id: str, *, session: Optional[requests.Session] = None) -> Dict[str, Any]:
+    """Fetch name, address, and coordinates from Place Details."""
+    _check_api_key()
+    url = "https://maps.googleapis.com/maps/api/place/details/json"
+    fields = "name,formatted_address,geometry"
+    params = {"place_id": place_id, "fields": fields, "key": API_KEY}
+    s = session or requests
+    resp = s.get(url, params=params, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    status = data.get("status")
+    if status != "OK":
+        raise RuntimeError(f"Place Details failed: {status} - {data.get('error_message','')}")
+    result = data.get("result", {})
+    loc = (result.get("geometry") or {}).get("location") or {}
+    return {
+        "place_id": place_id,
+        "name": result.get("name"),
+        "address": result.get("formatted_address"),
+        "lat": loc.get("lat"),
+        "long": loc.get("lng"),
+    }
+
+# ============================================================
+# Helper: continuous colormap
+# ============================================================
 
 def make_colormap(colors, values, caption):
     vmin = float(values.min()) if len(values) else 0.0
@@ -32,9 +89,9 @@ def make_colormap(colors, values, caption):
     cmap.caption = caption
     return cmap
 
-# -------------------------------
-# 1) Read & prep tracts
-# -------------------------------
+# ============================================================
+# 1) Read & prep census tracts (Indiana)
+# ============================================================
 
 tracts = gpd.read_file("tl_2021_18_tract.shp")
 if tracts.crs is None:
@@ -43,11 +100,11 @@ tracts = tracts.to_crs(4326)
 
 tracts["COUNTYFP"] = tracts["COUNTYFP"].astype(str)
 county_fips = ["099", "141", "039"]  # Marshall, St Joseph, Elkhart
-filtered = tracts[tracts["COUNTYFP"].isin(county_fips)].copy()  # keep NAME, GEOID, geometry, etc.
+filtered = tracts[tracts["COUNTYFP"].isin(county_fips)].copy()
 
-# -------------------------------
+# ============================================================
 # 2) Pull ACS (no CSVs) and join by GEOID
-# -------------------------------
+# ============================================================
 
 YEAR = "2023"
 STATE = "18"
@@ -58,7 +115,7 @@ def fetch_acs(vars, dataset="acs/acs5"):
     for c in COUNTIES:
         url = f"https://api.census.gov/data/{YEAR}/{dataset}"
         params = {"get": ",".join(["NAME"] + vars), "for": "tract:*", "in": f"state:{STATE}+county:{c}"}
-        r = requests.get(url, params=params); r.raise_for_status()
+        r = requests.get(url, params=params, timeout=30); r.raise_for_status()
         cols, *rows = r.json()
         df = pd.DataFrame(rows, columns=cols)
         frames.append(df)
@@ -71,12 +128,12 @@ inc = fetch_acs(["B19013_001E"])
 inc.rename(columns={"B19013_001E": "MedianIncomeNum"}, inplace=True)
 inc["MedianIncomeNum"] = pd.to_numeric(inc["MedianIncomeNum"], errors="coerce")
 
-# Poverty percent (share of people below poverty)
+# Poverty percent
 pov = fetch_acs(["S1701_C03_001E"], dataset="acs/acs5/subject")
 pov.rename(columns={"S1701_C03_001E": "PovertyPct"}, inplace=True)
 pov["PovertyPct"] = pd.to_numeric(pov["PovertyPct"], errors="coerce")
 
-# Age bins: total pop, <18 (8 bins M/F), 65+ (12 bins M/F)
+# Age bins
 age_vars = ["B01001_001E",
             "B01001_003E","B01001_004E","B01001_005E","B01001_006E",
             "B01001_027E","B01001_028E","B01001_029E","B01001_030E",
@@ -102,39 +159,89 @@ acs = (inc[["geoid","MedianIncomeNum"]]
 merged_gdf = filtered.merge(acs, left_on="GEOID", right_on="geoid", how="left")
 
 # Labels for tooltips/popups
-merged_gdf["IncomeLabel"]      = merged_gdf["MedianIncomeNum"].map(lambda v: f"${float(v):,.0f}" if pd.notna(v) else "NA")
-merged_gdf["PovertyLabel"]     = merged_gdf["PovertyPct"].map(lambda v: f"{float(v):.1f}%" if pd.notna(v) else "NA")
-merged_gdf["Population"]       = pd.to_numeric(merged_gdf["Total"], errors="coerce")
-merged_gdf["PopulationLabel"]  = merged_gdf["Population"].map(lambda v: f"{int(v):,}" if pd.notna(v) else "NA")
+merged_gdf["IncomeLabel"] = merged_gdf["MedianIncomeNum"].map(lambda v: f"${float(v):,.0f}" if pd.notna(v) else "NA")
+merged_gdf["PovertyLabel"] = merged_gdf["PovertyPct"].map(lambda v: f"{float(v):.1f}%" if pd.notna(v) else "NA")
+merged_gdf["Population"] = pd.to_numeric(merged_gdf["Total"], errors="coerce")
+merged_gdf["PopulationLabel"] = merged_gdf["Population"].map(lambda v: f"{int(v):,}" if pd.notna(v) else "NA")
 merged_gdf["CensusReporter_Link"] = "https://censusreporter.org/profiles/14000US" + merged_gdf["geoid"].astype(str)
 
-# -------------------------------
-# 3) Pantries (geocode if needed) + buffers (1 mile)
-# -------------------------------
+# ============================================================
+# 3) Pantry geocoding via Google + buffers (1 mile)
+# ============================================================
 
-pantries = pd.read_csv("UPDATE5_Final_Cleaned_Pantry_Locations.csv - Sheet1.csv")
-if "lat" not in pantries.columns or "long" not in pantries.columns:
-    geolocator = ArcGIS(timeout=10)
-    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=0.2)
-    lat, lon = [], []
-    for addr in pantries["Address"].astype(str):
-        loc = geocode(addr)
-        if loc:
-            lat.append(loc.latitude); lon.append(loc.longitude)
-        else:
-            lat.append(np.nan); lon.append(np.nan)
-    pantries["lat"] = lat; pantries["long"] = lon
+pantries = pd.read_csv("location_2025.csv")
+name_col = "Location Names"     # <-- expects this column with location names
+if name_col not in pantries.columns:
+    raise RuntimeError(f"Expected a '{name_col}' column in location_2025.csv")
 
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+need_lat_long = ("lat" not in pantries.columns) or ("long" not in pantries.columns)
+need_address  = ("Address" not in pantries.columns)
+
+if need_lat_long or need_address or (("lat" in pantries.columns and "long" in pantries.columns) and pantries[["lat","long"]].isna().any().any()):
+    unique_names = (
+        pantries[name_col].astype(str).map(_norm).replace({"": np.nan}).dropna().unique()
+    )
+
+    cache: Dict[str, Dict[str, Any]] = {}
+    with requests.Session() as sess:
+        for nm in unique_names:
+            if nm in cache:
+                continue
+            try:
+                pid = get_place_id(nm, session=sess)
+                det = get_place_details(pid, session=sess)
+                cache[nm] = det
+            except Exception as e:
+                cache[nm] = {"place_id": None, "name": None, "address": None, "lat": np.nan, "long": np.nan}
+                print(f"[warn] geocode failed for '{nm}': {e}", file=sys.stderr)
+
+    pantries["_norm_name"] = pantries[name_col].astype(str).map(_norm)
+    pantries["place_id"] = pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("place_id"))
+
+    if "lat" not in pantries.columns:
+        pantries["lat"] = pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("lat"))
+    else:
+        pantries["lat"] = pantries["lat"].fillna(pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("lat")))
+
+    if "long" not in pantries.columns:
+        pantries["long"] = pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("long"))
+    else:
+        pantries["long"] = pantries["long"].fillna(pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("long")))
+
+    if "Address" not in pantries.columns:
+        pantries["Address"] = pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("address"))
+    else:
+        pantries["Address"] = pantries["Address"].fillna(
+            pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("address"))
+        )
+
+# Drop rows without coordinates
 pantries = pantries.dropna(subset=["lat", "long"]).copy()
+
+# Deduplicate by place_id; fallback to rounded coordinates
+if "place_id" in pantries.columns:
+    pantries = pantries.drop_duplicates(subset=["place_id"]).copy()
+pantries["_lat_r"] = pantries["lat"].round(6)
+pantries["_lon_r"] = pantries["long"].round(6)
+pantries = pantries.drop_duplicates(subset=["_lat_r", "_lon_r"]).copy()
+
+# Geo buffer 1 mile
 pantries_gdf = gpd.GeoDataFrame(
     pantries, geometry=gpd.points_from_xy(pantries["long"], pantries["lat"]), crs=4326
 )
-pantries_buf = pantries_gdf.to_crs(26916).buffer(1609.34)   # 1 mile in meters (UTM 16N)
-pantries_buf_gdf = gpd.GeoDataFrame(geometry=gpd.GeoSeries(pantries_buf, crs=26916).to_crs(4326), crs=4326)
+# UTM 16N for northern Indiana; adjust if needed
+pantries_buf = pantries_gdf.to_crs(26916).buffer(1609.34)   # 1 mile
+pantries_buf_gdf = gpd.GeoDataFrame(
+    geometry=gpd.GeoSeries(pantries_buf, crs=26916).to_crs(4326),
+    crs=4326
+)
 
-# -------------------------------
+# ============================================================
 # 4) Bus routes & counties
-# -------------------------------
+# ============================================================
 
 routes = gpd.read_file("TranspoRoutes.shp").to_crs(4326)
 line_attr = "line_name" if "line_name" in routes.columns else ("clean_name" if "clean_name" in routes.columns else None)
@@ -168,13 +275,17 @@ route_colors = {
 counties = gpd.read_file("County_Boundaries_of_Indiana_Current.shp").to_crs(4326)
 target_counties = counties[counties["name"].isin(["Elkhart", "Marshall", "St Joseph"])].copy()
 
-# -------------------------------
-# 5) Map & layers
-# -------------------------------
+# ============================================================
+# 5) Map & layers (build ONCE)
+# ============================================================
 
-m = folium.Map(location=[41.68, -86.25], zoom_start=9, tiles="CartoDB positron")
+# Create the map ONCE (don’t overwrite later)
+m = folium.Map(location=[41.68, -86.25], zoom_start=9, control_scale=True, tiles="OpenStreetMap")
+# Add some alternative base tiles to get radio buttons
+folium.TileLayer("CartoDB positron", name="Light", overlay = True, control=True).add_to(m)
+folium.TileLayer("CartoDB dark_matter", name="Dark",overlay= True, control=True).add_to(m)
 
-# Poverty choropleth
+# Poverty choropleth (overlay checkbox)
 pov_vals = merged_gdf["PovertyPct"].dropna()
 pov_cmap = make_colormap(["#fee5d9", "#fcae91", "#fb6a4a", "#cb181d"], pov_vals, "Poverty Level (%)")
 
@@ -192,15 +303,18 @@ popup_pov = folium.GeoJsonPopup(
     aliases=["Tract", "Poverty (%)", "CensusReporter"], localize=True, labels=True,
 )
 
-pov_fg = FeatureGroup(name="Poverty Level", overlay=False, show=True)
-folium.GeoJson(merged_gdf.to_json(), style_function=style_poverty,
-               tooltip=tooltip_pov, popup=popup_pov,
-               highlight_function=lambda x: {"weight": 2, "color": "#666", "fillOpacity": 0.9}
+pov_fg = FeatureGroup(name="Poverty Level", overlay = False, show=True)
+folium.GeoJson(
+    merged_gdf.to_json(),
+    style_function=style_poverty,
+    tooltip=tooltip_pov,
+    popup=popup_pov,
+    highlight_function=lambda x: {"weight": 2, "color": "#666", "fillOpacity": 0.9}
 ).add_to(pov_fg)
 pov_fg.add_to(m)
 pov_cmap.add_to(m)
 
-# Age choropleths
+# Age choropleths (overlays)
 merged_gdf["Over_65Per"]  = pd.to_numeric(merged_gdf["Over_65Per"], errors="coerce")
 merged_gdf["Under_18Per"] = pd.to_numeric(merged_gdf["Under_18Per"], errors="coerce")
 
@@ -227,14 +341,14 @@ tooltip_u18 = folium.GeoJsonTooltip(
     aliases=["Tract", "% <18", "% 65+", "Population"], localize=True, sticky=True,
 )
 
-age65_fg = FeatureGroup(name="Over 65 (%)",overlay=False, show=False)
-u18_fg   = FeatureGroup(name="Under 18 (%)",overlay=False, show=False)
+age65_fg = FeatureGroup(name="Over 65 (%)", overlay = False, show=False)
+u18_fg   = FeatureGroup(name="Under 18 (%)", overlay = False, show=False)
 folium.GeoJson(merged_gdf.to_json(), style_function=style_age65, tooltip=tooltip_age65).add_to(age65_fg)
 folium.GeoJson(merged_gdf.to_json(), style_function=style_u18,  tooltip=tooltip_u18 ).add_to(u18_fg)
 age65_fg.add_to(m); u18_fg.add_to(m)
 age65_cmap.add_to(m); u18_cmap.add_to(m)
 
-# Median income choropleth
+# Median income choropleth (overlay)
 inc_vals = merged_gdf["MedianIncomeNum"].dropna()
 inc_cmap = make_colormap(["#f7fbff", "#deebf7", "#9ecae1", "#3182bd"], inc_vals, "Median Income ($)")
 
@@ -252,45 +366,38 @@ popup_income = folium.GeoJsonPopup(
     aliases=["Tract", "Median Income ($)", "CensusReporter"], localize=True, labels=True,
 )
 
-inc_fg = FeatureGroup(name="Median Income",overlay=False, show=False)
-folium.GeoJson(merged_gdf.to_json(), style_function=style_income,
-               tooltip=tooltip_income, popup=popup_income,
-               highlight_function=lambda x: {"weight": 2, "color": "#666", "fillOpacity": 0.9}
+inc_fg = FeatureGroup(name="Median Income", overlay = False, show=False)
+folium.GeoJson(
+    merged_gdf.to_json(),
+    style_function=style_income,
+    tooltip=tooltip_income,
+    popup=popup_income,
+    highlight_function=lambda x: {"weight": 2, "color": "#666", "fillOpacity": 0.9}
 ).add_to(inc_fg)
 inc_fg.add_to(m)
 inc_cmap.add_to(m)
 
-# 1) Read and aggregate the FoodOutgoing file
+# FoodOutgoing county impact (overlay)
 food = pd.read_csv("FoodOutgoing2025_1.csv", encoding="latin-1")
 food["County"] = food["County"].astype(str).str.strip()
-
-food["Total Pounds"] = pd.to_numeric(
-    food["Total Pounds"].astype(str).str.replace(",", ""),
-    errors="coerce"
-).fillna(0)
+food["Total Pounds"] = pd.to_numeric(food["Total Pounds"].astype(str).str.replace(",", ""), errors="coerce").fillna(0)
 food = food[food["County"].isin(["ELK", "SJ", "MAR"])].copy()
 
-# Sum by county code
 sum_by_code = (
     food.groupby("County", as_index=False)["Total Pounds"]
         .sum()
         .rename(columns={"Total Pounds": "TotalPounds"})
 )
-
-# 2) Map codes -> county names that match your county shapefile
 code_to_name = {"ELK": "Elkhart", "SJ": "St Joseph", "MAR": "Marshall"}
 sum_by_code["name"] = sum_by_code["County"].map(code_to_name)
 
-# 3) Join totals onto the county polygons you already loaded
-impact_gdf = target_counties.merge(sum_by_code[["name", "TotalPounds"]],
-                                   on="name", how="left")
+impact_gdf = target_counties.merge(sum_by_code[["name", "TotalPounds"]], on="name", how="left")
 impact_gdf["TotalPounds"] = pd.to_numeric(impact_gdf["TotalPounds"], errors="coerce").fillna(0)
 impact_gdf["TotalPoundsLabel"] = impact_gdf["TotalPounds"].map(lambda v: f"{int(round(v)):,}")
 
-# 4) Build a color scale and styles
 impact_vals = impact_gdf["TotalPounds"]
 impact_cmap = make_colormap(
-    colors=["#f7fcf5", "#c7e9c0", "#74c476", "#238b45"],  # light -> dark
+    colors=["#f7fcf5", "#c7e9c0", "#74c476", "#238b45"],
     values=impact_vals,
     caption="Total Pounds Distributed (by County)"
 )
@@ -311,8 +418,7 @@ tooltip_impact = folium.GeoJsonTooltip(
     sticky=True,
 )
 
-# 5) Add the county impact layer
-impact_fg = FeatureGroup(name="County Impact: Total Pounds",overlay=False, show=False)
+impact_fg = FeatureGroup(name="County Impact: Total Pounds", overlay = False, show=False)
 folium.GeoJson(
     impact_gdf.to_json(),
     style_function=style_impact,
@@ -322,7 +428,7 @@ folium.GeoJson(
 impact_fg.add_to(m)
 impact_cmap.add_to(m)
 
-# County boundaries (always on)
+# County boundaries (overlay)
 folium.GeoJson(
     target_counties.to_json(),
     name="County Boundaries",
@@ -330,8 +436,8 @@ folium.GeoJson(
     tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["County"], localize=True, sticky=True),
 ).add_to(m)
 
-# Bus routes
-routes_fg = FeatureGroup(name="Bus Routes", show=True)
+# Bus routes (overlay)
+routes_fg = FeatureGroup(name="Bus Routes", overlay = False, show=True)
 def route_style(feat):
     nm = feat["properties"].get(line_attr, "")
     col = route_colors.get(nm, "#808080")
@@ -344,8 +450,8 @@ folium.GeoJson(
 ).add_to(routes_fg)
 routes_fg.add_to(m)
 
-# Pantry buffers & markers
-buffers_fg = FeatureGroup(name="Pantry Coverage (1 mi)", show=False)
+# Pantry buffers (overlay)
+buffers_fg = FeatureGroup(name="Pantry Coverage (1 mi)", overlay = False, show=True)
 folium.GeoJson(
     pantries_buf_gdf.to_json(),
     name="Pantry Coverage",
@@ -353,23 +459,47 @@ folium.GeoJson(
 ).add_to(buffers_fg)
 buffers_fg.add_to(m)
 
-markers_fg = FeatureGroup(name="Food Pantries", show=False)
-mc = MarkerCluster().add_to(markers_fg)
-for _, r in pantries.iterrows():
-    if pd.isna(r["lat"]) or pd.isna(r["long"]): 
-        continue
-    html = f"""
-    <b>{r.get('Pantry.Name','Pantry')}</b><br>
-    Address: {r.get('Address','N/A')}<br>
-    Hours: {r.get('Recurring.Hours','N/A')}<br>
-    Requirements: {r.get('What.to.Bring','N/A')}<br>
-    <a href="{r.get('Link','')}" target="_blank">View on Google Maps</a>
-    """
-    folium.Marker([r["lat"], r["long"]], popup=folium.Popup(html, max_width=350)).add_to(mc)
-markers_fg.add_to(m)
+# Pantry markers (overlay)
+pantries["_program_norm"] = pantries.get("Program", "").astype(str).str.strip().str.lower()
 
+all_df       = pantries
+ccfn_df      = pantries[pantries["_program_norm"] == "ccfn"]
+backpack_df  = pantries[pantries["_program_norm"] == "backpack"]
+
+def _add_marker_group(group_df: pd.DataFrame, group_name: str, show: bool = False):
+    fg = FeatureGroup(name=group_name, overlay=False, show=show)
+    mc = MarkerCluster().add_to(fg)
+    for _, r in group_df.iterrows():
+        if pd.isna(r.get("lat")) or pd.isna(r.get("long")):
+            continue
+        pantry_name = str(r.get(name_col, "Unnamed")).strip()
+        address = str(r.get("Address", "N/A")).strip()
+        html = f"""
+        <b>{pantry_name}</b><br>
+        Address: {address}<br>
+        <a href="https://www.google.com/maps/search/?api=1&query={r['lat']},{r['long']}" target="_blank">View on Google Maps</a>
+        """
+        folium.Marker(
+            [r["lat"], r["long"]],
+            popup=folium.Popup(html, max_width=350)
+        ).add_to(mc)
+    fg.add_to(m)
+
+# Create three base layers for markers
+_add_marker_group(all_df,      "Pantries: All",      show=True)
+_add_marker_group(ccfn_df,     "Pantries: CCFN",     show=False)
+_add_marker_group(backpack_df, "Pantries: Backpack", show=False)
+
+# Fit to pantry extent if available
+if not pantries.empty:
+    minx, miny, maxx, maxy = pantries_gdf.total_bounds
+    if np.isfinite([minx, miny, maxx, maxy]).all():
+        m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+# Layer control at the end
 LayerControl(collapsed=False).add_to(m)
 
 # Save
-m.save("TranspoFoodiePovMap5__python3_reproduce_scrape.html")
-print("Wrote TranspoFoodiePovMap5__python3_reproduce_scrape.html")
+out_file = "TranspoFoodiePovMap5__python3_reproduce_scrape.html"
+m.save(out_file)
+print(f"Wrote {out_file}")

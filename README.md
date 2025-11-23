@@ -1,6 +1,6 @@
 # NDMN
 
-After cloning this repo, run either of the Python files to generate the map.
+After cloning this repo, run the html file to generate the map.
 
 ## Steps
 

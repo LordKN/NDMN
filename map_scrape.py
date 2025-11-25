@@ -19,7 +19,7 @@ import numpy as np
 import requests
 import folium
 from folium import FeatureGroup, LayerControl
-from folium.plugins import MarkerCluster
+from folium.plugins import MarkerCluster, GroupedLayerControl
 import branca
 from typing import Dict, Any, Optional
 
@@ -429,12 +429,14 @@ impact_fg.add_to(m)
 impact_cmap.add_to(m)
 
 # County boundaries (overlay)
+county_fg = FeatureGroup(name="County Boundaries", overlay=True, show=True)
 folium.GeoJson(
     target_counties.to_json(),
-    name="County Boundaries",
     style_function=lambda f: {"color": "black", "weight": 3, "opacity": 0.8},
     tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["County"], localize=True, sticky=True),
-).add_to(m)
+).add_to(county_fg)
+county_fg.add_to(m)
+
 
 # Bus routes (overlay)
 routes_fg = FeatureGroup(name="Bus Routes", overlay = False, show=True)
@@ -484,11 +486,13 @@ def _add_marker_group(group_df: pd.DataFrame, group_name: str, show: bool = Fals
             popup=folium.Popup(html, max_width=350)
         ).add_to(mc)
     fg.add_to(m)
+    return fg
 
 # Create three base layers for markers
-_add_marker_group(all_df,      "Pantries: All",      show=True)
-_add_marker_group(ccfn_df,     "Pantries: CCFN",     show=False)
-_add_marker_group(backpack_df, "Pantries: Backpack", show=False)
+pantries_all_fg      = _add_marker_group(all_df,      "Pantries: All",      show=True)
+pantries_ccfn_fg     = _add_marker_group(ccfn_df,     "Pantries: CCFN",     show=False)
+pantries_backpack_fg = _add_marker_group(backpack_df, "Pantries: Backpack", show=False)
+
 
 # Fit to pantry extent if available
 if not pantries.empty:
@@ -496,8 +500,21 @@ if not pantries.empty:
     if np.isfinite([minx, miny, maxx, maxy]).all():
         m.fit_bounds([[miny, minx], [maxy, maxx]])
 
-# Layer control at the end
+# Layer control at the end (for base tiles etc.)
 LayerControl(collapsed=False).add_to(m)
+
+# Grouped layer control with collapsible headings and radio-circle buttons
+GroupedLayerControl(
+    groups={
+        "Demographics": [pov_fg, age65_fg, u18_fg, inc_fg],
+        "Pantries": [buffers_fg, pantries_all_fg, pantries_ccfn_fg, pantries_backpack_fg],
+        "Transportation": [routes_fg],
+        "Counties & Impact": [county_fg, impact_fg],
+    },
+    # exclusive_groups=True  # default; keeps the radio-circle behavior within each group
+    collapsed=False,
+).add_to(m)
+
 
 # Save
 out_file = "TranspoFoodiePovMap5__python3_reproduce_scrape.html"

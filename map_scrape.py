@@ -22,6 +22,7 @@ from folium import FeatureGroup, LayerControl
 from folium.plugins import MarkerCluster, GroupedLayerControl
 import branca
 from typing import Dict, Any, Optional
+from urllib.parse import quote_plus
 
 # ============================================================
 # Google Places helpers (Text Search -> place_id -> Details)
@@ -177,12 +178,96 @@ if name_col not in pantries.columns:
 def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
-need_lat_long = ("lat" not in pantries.columns) or ("long" not in pantries.columns)
-need_address  = ("Address" not in pantries.columns)
+# Ensure Missing Addresses column exists
+if "Missing Addresses" not in pantries.columns:
+    pantries["Missing Addresses"] = np.nan
 
-if need_lat_long or need_address or (("lat" in pantries.columns and "long" in pantries.columns) and pantries[["lat","long"]].isna().any().any()):
+# Normalize name once; needed for fallback name-based geocoding
+pantries["_norm_name"] = pantries[name_col].astype(str).map(_norm)
+
+# Ensure output columns exist
+if "place_id" not in pantries.columns:
+    pantries["place_id"] = None
+if "lat" not in pantries.columns:
+    pantries["lat"] = np.nan
+if "long" not in pantries.columns:
+    pantries["long"] = np.nan
+if "Address" not in pantries.columns:
+    pantries["Address"] = np.nan
+
+# ------------------------------------------------------------
+# 1) Geocode rows that HAVE a "Missing Addresses" value
+#    → use that address to get exact lat/long
+# ------------------------------------------------------------
+mask_manual = pantries["Missing Addresses"].notna()
+
+if mask_manual.any():
+    manual_addrs = (
+        pantries.loc[mask_manual, "Missing Addresses"]
+        .astype(str)
+        .str.strip()
+    )
+
+    unique_manual = (
+        manual_addrs
+        .replace({"": np.nan})
+        .dropna()
+        .unique()
+    )
+
+    manual_cache: Dict[str, Dict[str, Any]] = {}
+
+    with requests.Session() as sess:
+        for addr in unique_manual:
+            if addr in manual_cache:
+                continue
+            try:
+                pid = get_place_id(addr, session=sess)      # query by address string
+                det = get_place_details(pid, session=sess)
+                manual_cache[addr] = det
+            except Exception as e:
+                manual_cache[addr] = {
+                    "place_id": None,
+                    "name": None,
+                    "address": addr,
+                    "lat": np.nan,
+                    "long": np.nan,
+                }
+                print(f"[warn] geocode failed for manual address '{addr}': {e}", file=sys.stderr)
+
+    # Apply geocoded results back to rows with Missing Addresses
+    pantries.loc[mask_manual, "place_id"] = manual_addrs.map(
+        lambda a: (manual_cache.get(a) or {}).get("place_id")
+    )
+    pantries.loc[mask_manual, "lat"] = manual_addrs.map(
+        lambda a: (manual_cache.get(a) or {}).get("lat")
+    )
+    pantries.loc[mask_manual, "long"] = manual_addrs.map(
+        lambda a: (manual_cache.get(a) or {}).get("long")
+    )
+    # For popup: keep the manual address text as the display
+    pantries.loc[mask_manual, "Address"] = manual_addrs
+
+# ------------------------------------------------------------
+# 2) Only use Google API by LOCATION NAME for rows where
+#    Missing Addresses is NULL (fallback behavior)
+# ------------------------------------------------------------
+mask_need_api = pantries["Missing Addresses"].isna()
+
+# Determine if ANY of those rows still need coords or address
+need_lat_long_for_mask = pantries.loc[mask_need_api, ["lat", "long"]].isna().any().any()
+need_address_for_mask = pantries.loc[mask_need_api, "Address"].isna().any()
+
+if mask_need_api.any() and (need_lat_long_for_mask or need_address_for_mask):
+    # Only names for rows that actually need API-based geocoding
+    names_to_geocode = pantries.loc[mask_need_api, name_col]
+
     unique_names = (
-        pantries[name_col].astype(str).map(_norm).replace({"": np.nan}).dropna().unique()
+        names_to_geocode.astype(str)
+        .map(_norm)
+        .replace({"": np.nan})
+        .dropna()
+        .unique()
     )
 
     cache: Dict[str, Dict[str, Any]] = {}
@@ -191,33 +276,45 @@ if need_lat_long or need_address or (("lat" in pantries.columns and "long" in pa
             if nm in cache:
                 continue
             try:
-                pid = get_place_id(nm, session=sess)
+                pid = get_place_id(nm, session=sess)        # query by location name
                 det = get_place_details(pid, session=sess)
                 cache[nm] = det
             except Exception as e:
-                cache[nm] = {"place_id": None, "name": None, "address": None, "lat": np.nan, "long": np.nan}
+                cache[nm] = {
+                    "place_id": None,
+                    "name": None,
+                    "address": None,
+                    "lat": np.nan,
+                    "long": np.nan,
+                }
                 print(f"[warn] geocode failed for '{nm}': {e}", file=sys.stderr)
 
-    pantries["_norm_name"] = pantries[name_col].astype(str).map(_norm)
-    pantries["place_id"] = pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("place_id"))
+    # Apply results ONLY to rows where Missing Addresses is null
+    norm_need_api = pantries.loc[mask_need_api, "_norm_name"]
 
-    if "lat" not in pantries.columns:
-        pantries["lat"] = pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("lat"))
-    else:
-        pantries["lat"] = pantries["lat"].fillna(pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("lat")))
+    # place_id
+    pantries.loc[mask_need_api, "place_id"] = pantries.loc[mask_need_api, "place_id"].fillna(
+        norm_need_api.map(lambda k: (cache.get(k) or {}).get("place_id"))
+    )
 
-    if "long" not in pantries.columns:
-        pantries["long"] = pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("long"))
-    else:
-        pantries["long"] = pantries["long"].fillna(pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("long")))
+    # lat
+    pantries.loc[mask_need_api, "lat"] = pantries.loc[mask_need_api, "lat"].fillna(
+        norm_need_api.map(lambda k: (cache.get(k) or {}).get("lat"))
+    )
 
-    if "Address" not in pantries.columns:
-        pantries["Address"] = pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("address"))
-    else:
-        pantries["Address"] = pantries["Address"].fillna(
-            pantries["_norm_name"].map(lambda k: (cache.get(k) or {}).get("address"))
-        )
+    # long
+    pantries.loc[mask_need_api, "long"] = pantries.loc[mask_need_api, "long"].fillna(
+        norm_need_api.map(lambda k: (cache.get(k) or {}).get("long"))
+    )
 
+    # Address (only for rows without manual addresses)
+    pantries.loc[mask_need_api, "Address"] = pantries.loc[mask_need_api, "Address"].fillna(
+        norm_need_api.map(lambda k: (cache.get(k) or {}).get("address"))
+    )
+
+# ------------------------------------------------------------
+# 3) Clean + buffers
+# ------------------------------------------------------------
 # Drop rows without coordinates
 pantries = pantries.dropna(subset=["lat", "long"]).copy()
 
@@ -238,6 +335,7 @@ pantries_buf_gdf = gpd.GeoDataFrame(
     geometry=gpd.GeoSeries(pantries_buf, crs=26916).to_crs(4326),
     crs=4326
 )
+
 
 # ============================================================
 # 4) Bus routes & counties
@@ -471,20 +569,48 @@ backpack_df  = pantries[pantries["_program_norm"] == "backpack"]
 def _add_marker_group(group_df: pd.DataFrame, group_name: str, show: bool = False):
     fg = FeatureGroup(name=group_name, overlay=False, show=show)
     mc = MarkerCluster().add_to(fg)
+
     for _, r in group_df.iterrows():
         if pd.isna(r.get("lat")) or pd.isna(r.get("long")):
             continue
+
         pantry_name = str(r.get(name_col, "Unnamed")).strip()
-        address = str(r.get("Address", "N/A")).strip()
+
+        # Prefer Missing Addresses value if present, then Address
+        missing_raw = r.get("Missing Addresses")
+        if pd.isna(missing_raw):
+            missing_addr = ""
+        else:
+            missing_addr = str(missing_raw).strip()
+
+        base_addr = str(r.get("Address", "") or "").strip()
+
+        display_addr = missing_addr or base_addr or "N/A"
+
+        # Build Google Maps query:
+        # 1) address (manual or from API)
+        # 2) pantry name
+        # 3) lat,long as last resort
+        if display_addr != "N/A":
+            query_str = display_addr
+        elif pantry_name and pantry_name != "Unnamed":
+            query_str = pantry_name
+        else:
+            query_str = f"{r['lat']},{r['long']}"
+
+        maps_url = f"https://www.google.com/maps/search/?api=1&query={quote_plus(query_str)}"
+
         html = f"""
         <b>{pantry_name}</b><br>
-        Address: {address}<br>
-        <a href="https://www.google.com/maps/search/?api=1&query={r['lat']},{r['long']}" target="_blank">View on Google Maps</a>
+        Address: {display_addr}<br>
+        <a href="{maps_url}" target="_blank">View on Google Maps</a>
         """
+
         folium.Marker(
             [r["lat"], r["long"]],
             popup=folium.Popup(html, max_width=350)
         ).add_to(mc)
+
     fg.add_to(m)
     return fg
 
